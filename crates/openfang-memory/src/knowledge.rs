@@ -2,6 +2,8 @@
 //!
 //! Stores entities and relations with support for graph pattern queries.
 
+use crate::graph_backend::GraphBackend;
+use async_trait::async_trait;
 use chrono::Utc;
 use openfang_types::error::{OpenFangError, OpenFangResult};
 use openfang_types::memory::{
@@ -13,12 +15,18 @@ use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 /// Knowledge graph store backed by SQLite.
+///
+/// Implements the [`GraphBackend`] trait so it can be used interchangeably
+/// with the Graphiti backend via `Arc<dyn GraphBackend>`.
 #[derive(Clone)]
-pub struct KnowledgeStore {
+pub struct SqliteGraphStore {
     conn: Arc<Mutex<Connection>>,
 }
 
-impl KnowledgeStore {
+/// Backward-compatible type alias — all existing code using `KnowledgeStore` continues to work.
+pub type KnowledgeStore = SqliteGraphStore;
+
+impl SqliteGraphStore {
     /// Create a new knowledge store wrapping the given connection.
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
         Self { conn }
@@ -185,6 +193,57 @@ impl KnowledgeStore {
     }
 }
 
+/// `GraphBackend` implementation — wraps sync SQLite methods in `spawn_blocking`.
+#[async_trait]
+impl GraphBackend for SqliteGraphStore {
+    async fn add_entity(&self, entity: Entity) -> OpenFangResult<String> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.add_entity(entity))
+            .await
+            .map_err(|e| OpenFangError::Internal(e.to_string()))?
+    }
+
+    async fn add_relation(&self, relation: Relation) -> OpenFangResult<String> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.add_relation(relation))
+            .await
+            .map_err(|e| OpenFangError::Internal(e.to_string()))?
+    }
+
+    async fn query_graph(&self, pattern: GraphPattern) -> OpenFangResult<Vec<GraphMatch>> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.query_graph(pattern))
+            .await
+            .map_err(|e| OpenFangError::Internal(e.to_string()))?
+    }
+
+    /// SQLite backend falls back to `query_graph` for search — no vector/BM25 support.
+    async fn search(
+        &self,
+        query: &str,
+        _group_id: &str,
+        _limit: usize,
+    ) -> OpenFangResult<Vec<GraphMatch>> {
+        // Best-effort: match by source or target name containing the query words.
+        // Graphiti backend provides real hybrid search; this is a graceful fallback.
+        let store = self.clone();
+        let pattern = GraphPattern {
+            source: Some(query.to_string()),
+            relation: None,
+            target: None,
+            max_depth: 1,
+        };
+        tokio::task::spawn_blocking(move || store.query_graph(pattern))
+            .await
+            .map_err(|e| OpenFangError::Internal(e.to_string()))?
+    }
+
+    /// No-op for SQLite — episode ingestion is a Graphiti concept.
+    async fn ingest_episode(&self, _text: &str, _source: &str, _group_id: &str) -> OpenFangResult<()> {
+        Ok(())
+    }
+}
+
 /// Raw row from a graph query.
 struct RawGraphRow {
     s_id: String,
@@ -273,10 +332,10 @@ mod tests {
     use super::*;
     use crate::migration::run_migrations;
 
-    fn setup() -> KnowledgeStore {
+    fn setup() -> SqliteGraphStore {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
-        KnowledgeStore::new(Arc::new(Mutex::new(conn)))
+        SqliteGraphStore::new(Arc::new(Mutex::new(conn)))
     }
 
     #[test]

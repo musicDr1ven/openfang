@@ -4,7 +4,8 @@
 //! session store, and consolidation engine behind a single async API.
 
 use crate::consolidation::ConsolidationEngine;
-use crate::knowledge::KnowledgeStore;
+use crate::graph_backend::{create_graph_backend, GraphBackend};
+use crate::knowledge::SqliteGraphStore;
 use crate::migration::run_migrations;
 use crate::semantic::SemanticStore;
 use crate::session::{Session, SessionStore};
@@ -29,7 +30,8 @@ pub struct MemorySubstrate {
     conn: Arc<Mutex<Connection>>,
     structured: StructuredStore,
     semantic: SemanticStore,
-    knowledge: KnowledgeStore,
+    /// Pluggable graph backend — SQLite by default, Graphiti when configured.
+    knowledge: Arc<dyn GraphBackend + Send + Sync>,
     sessions: SessionStore,
     consolidation: ConsolidationEngine,
     usage: UsageStore,
@@ -37,6 +39,9 @@ pub struct MemorySubstrate {
 
 impl MemorySubstrate {
     /// Open or create a memory substrate at the given database path.
+    ///
+    /// Uses the SQLite graph backend. Use [`open_with_graph_config`] to select
+    /// the Graphiti temporal knowledge graph backend.
     pub fn open(db_path: &Path, decay_rate: f32) -> OpenFangResult<Self> {
         let conn = Connection::open(db_path).map_err(|e| OpenFangError::Memory(e.to_string()))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
@@ -48,7 +53,34 @@ impl MemorySubstrate {
             conn: Arc::clone(&shared),
             structured: StructuredStore::new(Arc::clone(&shared)),
             semantic: SemanticStore::new(Arc::clone(&shared)),
-            knowledge: KnowledgeStore::new(Arc::clone(&shared)),
+            knowledge: Arc::new(SqliteGraphStore::new(Arc::clone(&shared))),
+            sessions: SessionStore::new(Arc::clone(&shared)),
+            usage: UsageStore::new(Arc::clone(&shared)),
+            consolidation: ConsolidationEngine::new(shared, decay_rate),
+        })
+    }
+
+    /// Open or create a memory substrate with a specific graph backend.
+    ///
+    /// When `graph_config.backend == "graphiti"`, the Graphiti temporal knowledge
+    /// graph is used for knowledge operations. Otherwise falls back to SQLite.
+    pub fn open_with_graph_config(
+        db_path: &Path,
+        decay_rate: f32,
+        graph_config: &openfang_types::config::GraphConfig,
+    ) -> OpenFangResult<Self> {
+        let conn = Connection::open(db_path).map_err(|e| OpenFangError::Memory(e.to_string()))?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+            .map_err(|e| OpenFangError::Memory(e.to_string()))?;
+        run_migrations(&conn).map_err(|e| OpenFangError::Memory(e.to_string()))?;
+        let shared = Arc::new(Mutex::new(conn));
+        let knowledge = create_graph_backend(graph_config, Arc::clone(&shared));
+
+        Ok(Self {
+            conn: Arc::clone(&shared),
+            structured: StructuredStore::new(Arc::clone(&shared)),
+            semantic: SemanticStore::new(Arc::clone(&shared)),
+            knowledge,
             sessions: SessionStore::new(Arc::clone(&shared)),
             usage: UsageStore::new(Arc::clone(&shared)),
             consolidation: ConsolidationEngine::new(shared, decay_rate),
@@ -66,7 +98,7 @@ impl MemorySubstrate {
             conn: Arc::clone(&shared),
             structured: StructuredStore::new(Arc::clone(&shared)),
             semantic: SemanticStore::new(Arc::clone(&shared)),
-            knowledge: KnowledgeStore::new(Arc::clone(&shared)),
+            knowledge: Arc::new(SqliteGraphStore::new(Arc::clone(&shared))),
             sessions: SessionStore::new(Arc::clone(&shared)),
             usage: UsageStore::new(Arc::clone(&shared)),
             consolidation: ConsolidationEngine::new(shared, decay_rate),
@@ -81,6 +113,14 @@ impl MemorySubstrate {
     /// Get the shared database connection (for constructing stores from outside).
     pub fn usage_conn(&self) -> Arc<Mutex<Connection>> {
         Arc::clone(&self.conn)
+    }
+
+    /// Get a reference to the pluggable graph backend.
+    ///
+    /// Use this to call Graphiti-specific operations (`search`, `ingest_episode`)
+    /// when the Graphiti backend is configured.
+    pub fn graph_backend(&self) -> &Arc<dyn GraphBackend + Send + Sync> {
+        &self.knowledge
     }
 
     /// Save an agent entry to persistent storage.
@@ -638,24 +678,15 @@ impl Memory for MemorySubstrate {
     }
 
     async fn add_entity(&self, entity: Entity) -> OpenFangResult<String> {
-        let store = self.knowledge.clone();
-        tokio::task::spawn_blocking(move || store.add_entity(entity))
-            .await
-            .map_err(|e| OpenFangError::Internal(e.to_string()))?
+        self.knowledge.add_entity(entity).await
     }
 
     async fn add_relation(&self, relation: Relation) -> OpenFangResult<String> {
-        let store = self.knowledge.clone();
-        tokio::task::spawn_blocking(move || store.add_relation(relation))
-            .await
-            .map_err(|e| OpenFangError::Internal(e.to_string()))?
+        self.knowledge.add_relation(relation).await
     }
 
     async fn query_graph(&self, pattern: GraphPattern) -> OpenFangResult<Vec<GraphMatch>> {
-        let store = self.knowledge.clone();
-        tokio::task::spawn_blocking(move || store.query_graph(pattern))
-            .await
-            .map_err(|e| OpenFangError::Internal(e.to_string()))?
+        self.knowledge.query_graph(pattern).await
     }
 
     async fn consolidate(&self) -> OpenFangResult<ConsolidationReport> {

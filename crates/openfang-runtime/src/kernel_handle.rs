@@ -117,6 +117,35 @@ pub trait KernelHandle: Send + Sync {
         Err("Cron scheduler not available".to_string())
     }
 
+    /// Hybrid knowledge graph search via Graphiti (or SQLite fallback).
+    ///
+    /// `query` — natural language search query
+    /// `group_id` — agent knowledge namespace (e.g. "trading", "nursing", "session:agent-id")
+    /// `limit` — maximum results to return
+    async fn knowledge_search(
+        &self,
+        query: &str,
+        group_id: &str,
+        limit: usize,
+    ) -> Result<Vec<openfang_types::memory::GraphMatch>, String> {
+        let _ = (query, group_id, limit);
+        Err("Knowledge search not available".to_string())
+    }
+
+    /// Ingest a document (PDF or text file) into the knowledge graph.
+    ///
+    /// Routes through PageIndex (PDF structure extraction) → Graphiti (episode ingestion).
+    /// `file_path` — absolute path to the document
+    /// `agent_type` — determines the `group_id` and entity type hints (e.g. "trading", "nursing")
+    async fn knowledge_ingest_document(
+        &self,
+        file_path: &str,
+        agent_type: &str,
+    ) -> Result<String, String> {
+        let _ = (file_path, agent_type);
+        Err("Document ingestion not available — configure [graph] backend = \"graphiti\" in openfang.toml".to_string())
+    }
+
     /// Check if a tool requires approval based on current policy.
     fn requires_approval(&self, tool_name: &str) -> bool {
         let _ = tool_name;

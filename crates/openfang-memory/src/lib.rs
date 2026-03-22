@@ -3,17 +3,23 @@
 //! Provides a unified memory API over three storage backends:
 //! - **Structured store** (SQLite): Key-value pairs, sessions, agent state
 //! - **Semantic store**: Text-based search (Phase 1: LIKE matching, Phase 2: Qdrant vectors)
-//! - **Knowledge graph** (SQLite): Entities and relations
+//! - **Knowledge graph**: Pluggable via `GraphBackend` trait
+//!   - [`knowledge::SqliteGraphStore`] — legacy SQLite backend (default)
+//!   - [`graphiti_backend::GraphitiBackend`] — Graphiti temporal graph (FalkorDB)
 //!
 //! Agents interact with a single `Memory` trait that abstracts over all three stores.
 
 pub mod consolidation;
+pub mod graph_backend;
+pub mod graphiti_backend;
 pub mod knowledge;
 pub mod migration;
 pub mod semantic;
 pub mod session;
 pub mod structured;
 pub mod usage;
+
+pub use graph_backend::GraphBackend;
 
 mod substrate;
 pub use substrate::MemorySubstrate;

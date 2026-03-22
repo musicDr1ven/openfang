@@ -562,8 +562,12 @@ impl OpenFangKernel {
             .clone()
             .unwrap_or_else(|| config.data_dir.join("openfang.db"));
         let memory = Arc::new(
-            MemorySubstrate::open(&db_path, config.memory.decay_rate)
-                .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?,
+            MemorySubstrate::open_with_graph_config(
+                &db_path,
+                config.memory.decay_rate,
+                &config.graph,
+            )
+            .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?,
         );
 
         // Initialize credential resolver (vault → dotenv → env var)
@@ -5846,6 +5850,110 @@ impl KernelHandle for OpenFangKernel {
             .query_graph(pattern)
             .await
             .map_err(|e| format!("Knowledge query failed: {e}"))
+    }
+
+    async fn knowledge_search(
+        &self,
+        query: &str,
+        group_id: &str,
+        limit: usize,
+    ) -> Result<Vec<openfang_types::memory::GraphMatch>, String> {
+        self.memory
+            .graph_backend()
+            .search(query, group_id, limit)
+            .await
+            .map_err(|e| format!("Knowledge search failed: {e}"))
+    }
+
+    async fn knowledge_ingest_document(
+        &self,
+        file_path: &str,
+        agent_type: &str,
+    ) -> Result<String, String> {
+        // Verify the file exists
+        if !std::path::Path::new(file_path).exists() {
+            return Err(format!("File not found: {file_path}"));
+        }
+
+        let graphiti_url = &self.config.graph.graphiti_url;
+        if self.config.graph.backend != "graphiti" {
+            return Err(
+                "Document ingestion requires [graph] backend = \"graphiti\" in openfang.toml. \
+                 Current backend is SQLite (no LLM-based entity extraction)."
+                    .to_string(),
+            );
+        }
+
+        // Read the file content
+        let content = std::fs::read_to_string(file_path)
+            .map_err(|e| format!("Failed to read file '{file_path}': {e}"))?;
+
+        // Determine group_id from agent_type
+        let group_id = agent_type;
+
+        // Call the Graphiti service directly for plain text files.
+        // For PDFs, call the PageIndex endpoint which handles extraction first.
+        let is_pdf = file_path.to_lowercase().ends_with(".pdf");
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .map_err(|e| format!("HTTP client error: {e}"))?;
+
+        if is_pdf && self.config.pageindex.enabled {
+            // Route through the PageIndex service for PDF structure extraction
+            let pageindex_url = &self.config.pageindex.url;
+            let ingest_url = format!("{}/ingest/document", graphiti_url.trim_end_matches('/'));
+
+            let payload = serde_json::json!({
+                "file_path": file_path,
+                "group_id": group_id,
+                "pageindex_url": pageindex_url,
+            });
+
+            let resp = client
+                .post(&ingest_url)
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|e| format!("Graphiti ingest request failed: {e}"))?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(format!("Graphiti ingest HTTP {status}: {body}"));
+            }
+
+            let result: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| format!("Graphiti ingest response parse error: {e}"))?;
+
+            Ok(result
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Document ingested successfully")
+                .to_string())
+        } else {
+            // Ingest text content directly as a single episode
+            let source = std::path::Path::new(file_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(file_path);
+
+            self.memory
+                .graph_backend()
+                .ingest_episode(&content, source, group_id)
+                .await
+                .map_err(|e| format!("Episode ingestion failed: {e}"))?;
+
+            Ok(format!(
+                "Ingested '{}' ({} chars) into knowledge group '{}'",
+                source,
+                content.len(),
+                group_id
+            ))
+        }
     }
 
     /// Spawn with capability inheritance enforcement.

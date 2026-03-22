@@ -207,6 +207,19 @@ pub async fn run_agent_loop(
             .unwrap_or_default()
     };
 
+    // Recall relevant knowledge graph context from Graphiti (hybrid search).
+    // Runs after episodic memory recall so both can be combined in the prompt.
+    let group_id = manifest
+        .metadata
+        .get("knowledge_group_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default");
+    let graph_matches = memory
+        .graph_backend()
+        .search(user_message, group_id, 5)
+        .await
+        .unwrap_or_default();
+
     // Fire BeforePromptBuild hook
     let agent_id_str = session.agent_id.0.to_string();
     if let Some(hook_reg) = hooks {
@@ -232,6 +245,26 @@ pub async fn run_agent_loop(
             .collect();
         system_prompt.push_str("\n\n");
         system_prompt.push_str(&crate::prompt_builder::build_memory_section(&mem_pairs));
+    }
+
+    // Inject Graphiti knowledge graph context when results are available.
+    if !graph_matches.is_empty() {
+        system_prompt.push_str("\n\n## Knowledge Graph Context\n");
+        for m in &graph_matches {
+            let fact = m
+                .relation
+                .properties
+                .get("fact")
+                .and_then(|v| v.as_str());
+            if let Some(f) = fact {
+                system_prompt.push_str(&format!("- {f}\n"));
+            } else {
+                system_prompt.push_str(&format!(
+                    "- {} --[{:?}]--> {}\n",
+                    m.source.name, m.relation.relation, m.target.name
+                ));
+            }
+        }
     }
 
     // Add the user message to session history.
@@ -517,6 +550,20 @@ pub async fn run_agent_loop(
                         )
                         .await;
                 }
+
+                // Ingest this conversation turn into the Graphiti temporal knowledge graph.
+                // This builds a persistent, searchable graph of agent interactions over time.
+                // No-op when the SQLite backend is used.
+                let session_group_id =
+                    format!("session:{}", session.agent_id.0);
+                let _ = memory
+                    .graph_backend()
+                    .ingest_episode(
+                        &interaction_text,
+                        "conversation",
+                        &session_group_id,
+                    )
+                    .await;
 
                 // Notify phase: Done
                 if let Some(cb) = on_phase {

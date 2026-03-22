@@ -292,6 +292,8 @@ pub async fn execute_tool(
         "knowledge_add_entity" => tool_knowledge_add_entity(input, kernel).await,
         "knowledge_add_relation" => tool_knowledge_add_relation(input, kernel).await,
         "knowledge_query" => tool_knowledge_query(input, kernel).await,
+        "knowledge_search" => tool_knowledge_search(input, kernel).await,
+        "knowledge_ingest_document" => tool_knowledge_ingest_document(input, kernel).await,
 
         // Image analysis tool
         "image_analyze" => tool_image_analyze(input).await,
@@ -827,6 +829,31 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "target": { "type": "string", "description": "Filter by target entity name or ID (optional)" },
                     "max_depth": { "type": "integer", "description": "Maximum traversal depth (default: 1)" }
                 }
+            }),
+        },
+        ToolDefinition {
+            name: "knowledge_search".to_string(),
+            description: "Hybrid knowledge graph search combining vector similarity, BM25 keyword, and graph traversal (Graphiti backend). Use this for natural-language queries against the agent's knowledge graph. Supports optional temporal filtering. Falls back to structural query on SQLite backend.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Natural language search query" },
+                    "group_id": { "type": "string", "description": "Knowledge namespace to search (e.g. 'trading', 'nursing', 'session:agent-id'). Defaults to 'default'." },
+                    "limit": { "type": "integer", "description": "Maximum number of results to return (default: 10)" }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolDefinition {
+            name: "knowledge_ingest_document".to_string(),
+            description: "Ingest a document (PDF, text file) into the temporal knowledge graph. Routes through PageIndex for PDF section extraction, then Graphiti for entity/relation extraction and storage. Requires [graph] backend = 'graphiti' in config.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": { "type": "string", "description": "Absolute path to the document file (PDF or text)" },
+                    "agent_type": { "type": "string", "description": "Knowledge namespace for this document: 'trading', 'nursing', or a custom group_id" }
+                },
+                "required": ["file_path", "agent_type"]
             }),
         },
         // --- Image analysis tool ---
@@ -1929,6 +1956,72 @@ async fn tool_knowledge_query(
         ));
     }
     Ok(output)
+}
+
+async fn tool_knowledge_search(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let query = input["query"]
+        .as_str()
+        .ok_or("knowledge_search: 'query' is required")?;
+    let group_id = input["group_id"].as_str().unwrap_or("default");
+    let limit = input["limit"].as_u64().unwrap_or(10) as usize;
+
+    let matches = kh.knowledge_search(query, group_id, limit).await?;
+    if matches.is_empty() {
+        return Ok(format!(
+            "No knowledge graph results found for '{query}' in group '{group_id}'."
+        ));
+    }
+
+    let mut output = format!(
+        "Knowledge graph search: {} result(s) for '{}' (group: {}):\n",
+        matches.len(),
+        query,
+        group_id
+    );
+    for m in &matches {
+        // Include fact text if available (Graphiti stores it in relation properties)
+        let fact = m
+            .relation
+            .properties
+            .get("fact")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let score = m
+            .relation
+            .properties
+            .get("relevance_score")
+            .and_then(|v| v.as_f64())
+            .map(|s| format!(" [{:.2}]", s))
+            .unwrap_or_default();
+        if fact.is_empty() {
+            output.push_str(&format!(
+                "\n  {} --[{:?}]--> {}{}",
+                m.source.name, m.relation.relation, m.target.name, score
+            ));
+        } else {
+            output.push_str(&format!("\n  {}{}", fact, score));
+        }
+    }
+    Ok(output)
+}
+
+async fn tool_knowledge_ingest_document(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let file_path = input["file_path"]
+        .as_str()
+        .ok_or("knowledge_ingest_document: 'file_path' is required")?;
+    let agent_type = input["agent_type"]
+        .as_str()
+        .ok_or("knowledge_ingest_document: 'agent_type' is required")?;
+
+    kh.knowledge_ingest_document(file_path, agent_type).await
 }
 
 // ---------------------------------------------------------------------------

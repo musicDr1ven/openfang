@@ -1,0 +1,55 @@
+services:
+  # FalkorDB — Redis with GraphBLAS graph module
+  # The recommended Graphiti backend: sparse matrix representation, Cypher queries,
+  # official Rust client (falkordb-rs), and seamless scale-up to Redis cluster.
+  falkordb:
+    image: falkordb/falkordb:latest
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - falkordb_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Graphiti service — FastAPI wrapper around graphiti-core
+  graphiti:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8891:8891"
+    environment:
+      # FalkorDB connection (resolved from service name within compose network)
+      - FALKORDB_URL=redis://falkordb:6379
+
+      # LLM provider for entity extraction, deduplication, and temporal reasoning.
+      # Anthropic Haiku recommended: high throughput, low cost per episode (~$0.01).
+      - GRAPHITI_LLM_PROVIDER=${GRAPHITI_LLM_PROVIDER:-anthropic}
+      - GRAPHITI_LLM_MODEL=${GRAPHITI_LLM_MODEL:-claude-haiku-4-5-20251001}
+
+      # Embeddings provider (must be OpenAI-compatible; Anthropic has no embeddings API)
+      - GRAPHITI_EMBEDDER_PROVIDER=${GRAPHITI_EMBEDDER_PROVIDER:-openai}
+      - GRAPHITI_EMBEDDER_MODEL=${GRAPHITI_EMBEDDER_MODEL:-text-embedding-3-small}
+
+      # API keys — pass through from host environment
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+
+      # Service port
+      - GRAPHITI_PORT=8891
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8891/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  falkordb_data:
+    driver: local

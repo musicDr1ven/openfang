@@ -959,6 +959,130 @@ impl Default for ThinkingConfig {
     }
 }
 
+/// Graph backend configuration.
+///
+/// Selects between the legacy SQLite knowledge graph and the new Graphiti
+/// temporal knowledge graph backed by FalkorDB.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GraphConfig {
+    /// Backend to use: "sqlite" (default, backward-compat) or "graphiti".
+    pub backend: String,
+    /// URL of the Graphiti REST service (used when backend = "graphiti").
+    pub graphiti_url: String,
+    /// FalkorDB Redis URL (used by the Graphiti service itself, not the Rust client).
+    pub falkordb_url: String,
+}
+
+impl Default for GraphConfig {
+    fn default() -> Self {
+        Self {
+            backend: "sqlite".to_string(),
+            graphiti_url: "http://localhost:8891".to_string(),
+            falkordb_url: "redis://localhost:6379".to_string(),
+        }
+    }
+}
+
+/// PageIndex document structure extraction service configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PageIndexConfig {
+    /// URL of the PageIndex service.
+    pub url: String,
+    /// Enable PageIndex pre-processing for document ingestion.
+    pub enabled: bool,
+    /// LLM model used for document understanding.
+    pub llm_model: String,
+    /// Maximum tokens per extracted section node.
+    pub max_tokens_per_node: usize,
+    /// Maximum pages per section node.
+    pub max_pages_per_node: usize,
+}
+
+impl Default for PageIndexConfig {
+    fn default() -> Self {
+        Self {
+            url: "http://localhost:8890".to_string(),
+            enabled: false,
+            llm_model: "claude-sonnet-4-6".to_string(),
+            max_tokens_per_node: 20000,
+            max_pages_per_node: 10,
+        }
+    }
+}
+
+/// LLM provider used by the Graphiti service for entity extraction and deduplication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GraphitiLlmConfig {
+    /// LLM provider: "anthropic", "openai", "openrouter", or "ollama".
+    pub provider: String,
+    /// Model name (e.g., "claude-haiku-4-5-20251001" for high-throughput extraction).
+    pub model: String,
+    /// Base URL override (used for openrouter or ollama).
+    #[serde(default)]
+    pub base_url: Option<String>,
+}
+
+impl Default for GraphitiLlmConfig {
+    fn default() -> Self {
+        Self {
+            provider: "anthropic".to_string(),
+            model: "claude-haiku-4-5-20251001".to_string(),
+            base_url: None,
+        }
+    }
+}
+
+/// Embeddings provider used by the Graphiti service (must be OpenAI-compatible).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GraphitiEmbedderConfig {
+    /// Provider: "openai", "ollama", or "openrouter".
+    pub provider: String,
+    /// Embedding model name.
+    pub model: String,
+    /// Base URL override (for Ollama or custom endpoints).
+    #[serde(default)]
+    pub base_url: Option<String>,
+}
+
+impl Default for GraphitiEmbedderConfig {
+    fn default() -> Self {
+        Self {
+            provider: "openai".to_string(),
+            model: "text-embedding-3-small".to_string(),
+            base_url: None,
+        }
+    }
+}
+
+/// Knowledge extraction configuration (budget tracking and default entity types).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KnowledgeExtractionConfig {
+    /// Default entity types to extract when no agent-specific types are configured.
+    pub default_entity_types: Vec<String>,
+    /// Estimated cost per episode ingested (for budget tracking via metering engine).
+    pub cost_per_episode_usd: f64,
+}
+
+impl Default for KnowledgeExtractionConfig {
+    fn default() -> Self {
+        Self {
+            default_entity_types: vec![
+                "person".to_string(),
+                "organization".to_string(),
+                "concept".to_string(),
+                "event".to_string(),
+                "document".to_string(),
+            ],
+            cost_per_episode_usd: 0.01,
+        }
+    }
+}
+
 /// Top-level kernel configuration.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1099,6 +1223,21 @@ pub struct KernelConfig {
     /// Defaults to `~/.openfang/workflows`. Set to empty string to disable.
     #[serde(default)]
     pub workflows_dir: Option<PathBuf>,
+    /// Knowledge graph backend configuration (sqlite or graphiti+falkordb).
+    #[serde(default)]
+    pub graph: GraphConfig,
+    /// PageIndex document structure extraction service configuration.
+    #[serde(default)]
+    pub pageindex: PageIndexConfig,
+    /// LLM provider used by Graphiti for entity extraction and deduplication.
+    #[serde(default)]
+    pub graphiti_llm: GraphitiLlmConfig,
+    /// Embeddings provider for Graphiti (must be OpenAI-compatible).
+    #[serde(default)]
+    pub graphiti_embedder: GraphitiEmbedderConfig,
+    /// Knowledge extraction configuration (entity types, cost tracking).
+    #[serde(default)]
+    pub knowledge_extraction: KnowledgeExtractionConfig,
 }
 
 /// Dashboard authentication (username/password login).
@@ -1308,6 +1447,11 @@ impl Default for KernelConfig {
             oauth: OAuthConfig::default(),
             auth: AuthConfig::default(),
             workflows_dir: None,
+            graph: GraphConfig::default(),
+            pageindex: PageIndexConfig::default(),
+            graphiti_llm: GraphitiLlmConfig::default(),
+            graphiti_embedder: GraphitiEmbedderConfig::default(),
+            knowledge_extraction: KnowledgeExtractionConfig::default(),
         }
     }
 }
@@ -1426,6 +1570,8 @@ impl std::fmt::Debug for KernelConfig {
                 &format!("{} mapping(s)", self.provider_api_keys.len()),
             )
             .field("auth", &format!("enabled={}", self.auth.enabled))
+            .field("graph", &format!("backend={}", self.graph.backend))
+            .field("pageindex", &format!("enabled={}", self.pageindex.enabled))
             .finish()
     }
 }
