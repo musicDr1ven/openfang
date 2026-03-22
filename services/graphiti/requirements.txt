@@ -1,0 +1,20 @@
+# Graphiti temporal knowledge graph engine with FalkorDB backend
+# https://github.com/getzep/graphiti
+graphiti-core[falkordb,anthropic]>=0.3.0
+
+# Web framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+
+# PDF processing via PyMuPDF (used by pageindex_stage.py for text extraction)
+pymupdf>=1.24.0
+
+# PageIndex — hierarchical document structure extraction
+# https://github.com/pageintelligence/pageindex
+pageindex>=0.1.0
+
+# Pydantic for custom entity type definitions
+pydantic>=2.0.0
+
+# Environment variable management
+python-dotenv>=1.0.0
